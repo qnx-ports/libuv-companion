@@ -1,0 +1,514 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 73d5aff8..c8062995 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -747,6 +747,16 @@ if(LIBUV_BUILD_TESTS)
+                        "$<TARGET_FILE:uv_run_tests_a>"
+                        "$<TARGET_FILE_DIR:uv_run_tests_a>/uv_run_tests_a_no_ext")
+   endif()
++
++  if(QNX)
++    install(TARGETS uv_run_tests uv_run_tests_a uv_run_benchmarks_a
++      DESTINATION bin/libuv_tests
++    )
++
++    install(DIRECTORY test/fixtures
++      DESTINATION bin/libuv_tests
++    )
++  endif()
+ endif()
+ 
+ # Now for some gibbering horrors from beyond the stars...
+diff --git a/src/unix/core.c b/src/unix/core.c
+index bd51b69b..cba91420 100644
+--- a/src/unix/core.c
++++ b/src/unix/core.c
+@@ -275,7 +275,7 @@ void uv__make_close_pending(uv_handle_t* handle) {
+ int uv__getiovmax(void) {
+ #if defined(IOV_MAX)
+   return IOV_MAX;
+-#elif defined(_SC_IOV_MAX)
++#elif defined(_SC_IOV_MAX) && !defined(__QNX__)
+   static _Atomic int iovmax_cached = -1;
+   int iovmax;
+ 
+@@ -1611,6 +1611,10 @@ int uv_cpumask_size(void) {
+ }
+ 
+ int uv_os_getpriority(uv_pid_t pid, int* priority) {
++#if defined(__QNX__)
++  // QNX priority is not process-based
++  return UV_ENOSYS;
++#else
+   int r;
+ 
+   if (priority == NULL)
+@@ -1624,10 +1628,15 @@ int uv_os_getpriority(uv_pid_t pid, int* priority) {
+ 
+   *priority = r;
+   return 0;
++#endif
+ }
+ 
+ 
+ int uv_os_setpriority(uv_pid_t pid, int priority) {
++#if defined(__QNX__)
++  // QNX priority is not process-based
++  return UV_ENOSYS;
++#else
+   if (priority < UV_PRIORITY_HIGHEST || priority > UV_PRIORITY_LOW)
+     return UV_EINVAL;
+ 
+@@ -1635,6 +1644,7 @@ int uv_os_setpriority(uv_pid_t pid, int priority) {
+     return UV__ERR(errno);
+ 
+   return 0;
++#endif
+ }
+ 
+ /**
+diff --git a/src/unix/fs.c b/src/unix/fs.c
+index 717f3fab..bd3f5962 100644
+--- a/src/unix/fs.c
++++ b/src/unix/fs.c
+@@ -211,7 +211,8 @@ static ssize_t uv__fs_fdatasync(uv_fs_t* req) {
+     || defined(__NetBSD__)                                                    \
+     || defined(__OpenBSD__)                                                   \
+     || defined(__linux__)                                                     \
+-    || defined(__sun)
++    || defined(__sun)                                                         \
++    || defined(__QNX__)
+ static struct timespec uv__fs_to_timespec(double time) {
+   struct timespec ts;
+ 
+@@ -248,7 +249,8 @@ static ssize_t uv__fs_futime(uv_fs_t* req) {
+     || defined(__NetBSD__)                                                    \
+     || defined(__OpenBSD__)                                                   \
+     || defined(__linux__)                                                     \
+-    || defined(__sun)
++    || defined(__sun)                                                         \
++    || defined(__QNX__)
+   struct timespec ts[2];
+   ts[0] = uv__fs_to_timespec(req->atime);
+   ts[1] = uv__fs_to_timespec(req->mtime);
+@@ -1147,7 +1149,8 @@ static ssize_t uv__fs_utime(uv_fs_t* req) {
+     || defined(__NetBSD__)                                                    \
+     || defined(__OpenBSD__)                                                   \
+     || defined(__linux__)                                                     \
+-    || defined(__sun)
++    || defined(__sun)                                                         \
++    || defined(__QNX__)
+   struct timespec ts[2];
+   ts[0] = uv__fs_to_timespec(req->atime);
+   ts[1] = uv__fs_to_timespec(req->mtime);
+@@ -1181,7 +1184,8 @@ static ssize_t uv__fs_lutime(uv_fs_t* req) {
+     || defined(__NetBSD__)                                                    \
+     || defined(__OpenBSD__)                                                   \
+     || defined(__linux__)                                                     \
+-    || defined(__sun)
++    || defined(__sun)                                                         \
++    || defined(__QNX__)
+   struct timespec ts[2];
+   ts[0] = uv__fs_to_timespec(req->atime);
+   ts[1] = uv__fs_to_timespec(req->mtime);
+diff --git a/src/unix/internal.h b/src/unix/internal.h
+index a1d7d436..761454b2 100644
+--- a/src/unix/internal.h
++++ b/src/unix/internal.h
+@@ -141,6 +141,11 @@ union uv__sockaddr {
+ /* Leans on the fact that, on Linux, POLLRDHUP == EPOLLRDHUP. */
+ #ifdef POLLRDHUP
+ # define UV__POLLRDHUP POLLRDHUP
++#elif defined(__QNX__)
++/* On QNX, POLLRDHUP is not available and the 0x2000 workaround 
++ * leads to undefined bahavior.
++ */ 
++# define UV__POLLRDHUP 0
+ #else
+ # define UV__POLLRDHUP 0x2000
+ #endif
+diff --git a/src/unix/qnx.c b/src/unix/qnx.c
+index 57ea9dfd..a1a33a03 100644
+--- a/src/unix/qnx.c
++++ b/src/unix/qnx.c
+@@ -28,6 +28,16 @@
+ #include <sys/memmsg.h>
+ #include <sys/syspage.h>
+ #include <sys/procfs.h>
++#include <time.h>
++#include <stdlib.h>
++#include <inttypes.h>
++#if __QNX__ >= 800
++#define cpuinfo_val cpuinfo
++#else
++#define cpuinfo_val new_cpuinfo
++#endif
++#define BUF_SIZE 2048
++#define CONVERT_MB 1024*1024
+ 
+ static void
+ get_mem_info(uint64_t* totalmem, uint64_t* freemem) {
+@@ -67,18 +77,45 @@ int uv_exepath(char* buffer, size_t* size) {
+ }
+ 
+ 
++static uint64_t uv__read_pidin_info(const char* what)
++{
++  uint64_t rc;
++  char* p;
++  char buf[BUF_SIZE];
++  const char* cmd = "pidin info";
++
++  FILE* fp = popen(cmd, "r");
++  if(!fp) return -1;
++
++  size_t sz = fread(buf, 1, BUF_SIZE-1, fp);
++  buf[sz]='\0';
++
++  pclose(fp);
++
++  p = strstr(buf, what);
++  if(p == NULL)
++    return -1;
++
++  p += strlen(what);
++
++  rc = 0;
++  sscanf(p, "%" PRIu64 " MB", &rc);
++
++  return rc * CONVERT_MB;
++}
++
+ uint64_t uv_get_free_memory(void) {
+-  uint64_t totalmem;
+   uint64_t freemem;
+-  get_mem_info(&totalmem, &freemem);
++
++  freemem = uv__read_pidin_info("FreeMem:");
+   return freemem;
+ }
+ 
+ 
+ uint64_t uv_get_total_memory(void) {
+   uint64_t totalmem;
+-  uint64_t freemem;
+-  get_mem_info(&totalmem, &freemem);
++
++  totalmem = uv__read_pidin_info("MB/");
+   return totalmem;
+ }
+ 
+@@ -113,15 +150,18 @@ int uv_resident_set_memory(size_t* rss) {
+ 
+ 
+ int uv_uptime(double* uptime) {
+-  struct qtime_entry* qtime = _SYSPAGE_ENTRY(_syspage_ptr, qtime);
+-  *uptime = (qtime->nsec / 1000000000.0);
++  struct timespec ts;
++  int ret = clock_gettime(CLOCK_MONOTONIC, &ts);
++  if(ret == -1)
++    return ret;
++  *uptime = (double)ts.tv_sec;
+   return 0;
+ }
+ 
+ 
+ int uv_cpu_info(uv_cpu_info_t** cpu_infos, int* count) {
+   struct cpuinfo_entry* cpuinfo =
+-    (struct cpuinfo_entry*)_SYSPAGE_ENTRY(_syspage_ptr, new_cpuinfo);
++    (struct cpuinfo_entry*)_SYSPAGE_ENTRY(_syspage_ptr, cpuinfo_val);
+   size_t cpuinfo_size = _SYSPAGE_ELEMENT_SIZE(_syspage_ptr, cpuinfo);
+   struct strings_entry* strings = _SYSPAGE_ENTRY(_syspage_ptr, strings);
+   int num_cpus = _syspage_ptr->num_cpu;
+diff --git a/src/unix/udp.c b/src/unix/udp.c
+index c4a3559d..29b1318d 100644
+--- a/src/unix/udp.c
++++ b/src/unix/udp.c
+@@ -560,7 +560,7 @@ int uv__udp_disconnect(uv_udp_t* handle) {
+     } while (r == -1 && errno == EINTR);
+ 
+     if (r == -1) {
+-#if defined(BSD)  /* The macro BSD is from sys/param.h */
++#if defined(BSD) || defined(__QNX__) /* The macro BSD is from sys/param.h */
+       if (errno != EAFNOSUPPORT && errno != EINVAL)
+         return UV__ERR(errno);
+ #else
+@@ -766,8 +766,8 @@ static int uv__udp_set_membership6(uv_udp_t* handle,
+     !defined(__NetBSD__) &&                                         \
+     !defined(__ANDROID__) &&                                        \
+     !defined(__DragonFly__) &&                                      \
+-    !defined(__QNX__) &&                                            \
+-    !defined(__GNU__)
++    !defined(__GNU__) &&                                            \
++    !defined(QNX_IOPKT)
+ static int uv__udp_set_source_membership4(uv_udp_t* handle,
+                                           const struct sockaddr_in* multicast_addr,
+                                           const char* interface_addr,
+@@ -957,8 +957,8 @@ int uv_udp_set_source_membership(uv_udp_t* handle,
+     !defined(__NetBSD__) &&                                         \
+     !defined(__ANDROID__) &&                                        \
+     !defined(__DragonFly__) &&                                      \
+-    !defined(__QNX__) &&                                            \
+-    !defined(__GNU__)
++    !defined(__GNU__) &&                                          \
++    !defined(QNX_IOPKT)
+   int err;
+   union uv__sockaddr mcast_addr;
+   union uv__sockaddr src_addr;
+@@ -1312,7 +1312,7 @@ static int uv__udp_sendmsgv(int fd,
+   nsent = 0;
+ 
+ #if defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__) || \
+-  (defined(__sun__) && defined(MSG_WAITFORONE))
++  (defined(__sun__) || defined(__QNX__) && defined(MSG_WAITFORONE))
+   if (count > 1) {
+     for (i = 0; i < count; /*empty*/) {
+       struct mmsghdr m[20];
+diff --git a/test/task.h b/test/task.h
+index e25a9c9a..d3eeaf77 100644
+--- a/test/task.h
++++ b/test/task.h
+@@ -358,7 +358,7 @@ UNUSED static int can_ipv6(void) {
+   return supported;
+ }
+ 
+-#if defined(__CYGWIN__) || defined(__MSYS__) || defined(__PASE__)
++#if defined(__CYGWIN__) || defined(__MSYS__) || defined(__PASE__) || defined(__QNX__)
+ # define NO_FS_EVENTS "Filesystem watching not supported on this platform."
+ #endif
+ 
+diff --git a/test/test-embed.c b/test/test-embed.c
+index 6e991723..84fc7cad 100644
+--- a/test/test-embed.c
++++ b/test/test-embed.c
+@@ -25,7 +25,7 @@
+ #include <stdlib.h>
+ #include <errno.h>
+ 
+-#if !defined(_WIN32) && !defined(_AIX)
++#if !defined(_WIN32) && !defined(_AIX) && !defined(__QNX__)
+ #include <poll.h>
+ #endif
+ 
+@@ -56,7 +56,7 @@ TEST_IMPL(embed) {
+   ASSERT_LE(0, uv_barrier_wait(&barrier));
+ 
+   while (uv_loop_alive(loop)) {
+-#if defined(_WIN32) || defined(_AIX)
++#if defined(_WIN32) || defined(_AIX) || defined(__QNX__)
+     ASSERT_LE(0, uv_run(loop, UV_RUN_ONCE));
+ #else
+     int rc;
+diff --git a/test/test-fs.c b/test/test-fs.c
+index 4761b15b..9920b8f1 100644
+--- a/test/test-fs.c
++++ b/test/test-fs.c
+@@ -152,7 +152,7 @@ int uv_test_getiovmax(void) {
+ int uv_test_getiovmax(void) {
+ #if defined(IOV_MAX)
+   return IOV_MAX;
+-#elif defined(_SC_IOV_MAX)
++#elif defined(_SC_IOV_MAX) && !defined(__QNX__)
+   static int iovmax = -1;
+   if (iovmax == -1) {
+     iovmax = sysconf(_SC_IOV_MAX);
+@@ -356,7 +356,7 @@ static void statfs_cb(uv_fs_t* req) {
+   stats = req->ptr;
+ 
+ #if defined(_WIN32) || defined(__sun) || defined(_AIX) || defined(__MVS__) || \
+-  defined(__OpenBSD__) || defined(__NetBSD__)
++  defined(__OpenBSD__) || defined(__NetBSD__) || defined(__QNX__)
+   ASSERT_OK(stats->f_type);
+ #else
+   ASSERT_UINT64_GT(stats->f_type, 0);
+@@ -2833,7 +2833,9 @@ TEST_IMPL(fs_utime_round) {
+   double mtime;
+   uv_fs_t req;
+   int r;
+-
++#if defined(__QNX__)
++  RETURN_SKIP("Setting time to a negative value is unsupported on QNX");
++#endif
+   loop = uv_default_loop();
+   unlink(path);
+   r = uv_fs_open(NULL, &req, path, UV_FS_O_RDWR | UV_FS_O_CREAT,
+@@ -3889,6 +3891,12 @@ TEST_IMPL(fs_read_dir) {
+    * created on. That is why this assertion is a bit lenient.
+    */
+   ASSERT((r >= 0) || (r == UV_EISDIR));
++#elif defined(__QNX__)
++  /*
++   * If UV_FS_O_DIRECTORY is supplied, QNX would return ENOSYS. Otherwise
++   * UV_EISDIR would be returned. Here we are lenient to accept both.
++   */
++  ASSERT((r == UV_ENOSYS) || (r == UV_EISDIR));
+ #else
+   ASSERT_EQ(r, UV_EISDIR);
+ #endif
+diff --git a/test/test-poll.c b/test/test-poll.c
+index 5161de25..e6112b4e 100644
+--- a/test/test-poll.c
++++ b/test/test-poll.c
+@@ -83,9 +83,9 @@ static int closed_connections = 0;
+ static int valid_writable_wakeups = 0;
+ static int spurious_writable_wakeups = 0;
+ 
+-#if !defined(__sun) && !defined(_AIX) && !defined(__MVS__)
++#if !defined(__sun) && !defined(_AIX) && !defined(__MVS__) && !defined(__QNX__)
+ static int disconnects = 0;
+-#endif /* !__sun && !_AIX  && !__MVS__ */
++#endif /* !__sun && !_AIX  && !__MVS__ && !__QNX__*/
+ 
+ static int got_eagain(void) {
+ #ifdef _WIN32
+@@ -409,7 +409,7 @@ static void connection_poll_cb(uv_poll_t* handle, int status, int events) {
+       new_events &= ~UV_WRITABLE;
+     }
+   }
+-#if !defined(__sun) && !defined(_AIX) && !defined(__MVS__)
++#if !defined(__sun) && !defined(_AIX) && !defined(__MVS__) && !defined(__QNX__)
+   if (events & UV_DISCONNECT) {
+     context->got_disconnect = 1;
+     ++disconnects;
+@@ -417,9 +417,9 @@ static void connection_poll_cb(uv_poll_t* handle, int status, int events) {
+   }
+ 
+   if (context->got_fin && context->sent_fin && context->got_disconnect) {
+-#else /* __sun && _AIX  && __MVS__ */
++#else /* __sun && _AIX  && __MVS__ && __QNX__*/
+   if (context->got_fin && context->sent_fin) {
+-#endif /* !__sun && !_AIX && !__MVS__  */
++#endif /* !__sun && !_AIX && !__MVS__ && __QNX__ */
+     /* Sent and received FIN. Close and destroy context. */
+     close_socket(context->sock);
+     destroy_connection_context(context);
+@@ -587,7 +587,7 @@ static void start_poll_test(void) {
+             spurious_writable_wakeups > 20, 0);
+ 
+   ASSERT_EQ(closed_connections, NUM_CLIENTS * 2);
+-#if !defined(__sun) && !defined(_AIX) && !defined(__MVS__)
++#if !defined(__sun) && !defined(_AIX) && !defined(__MVS__) && !defined(__QNX__)
+   ASSERT_EQ(disconnects, NUM_CLIENTS * 2);
+ #endif
+   MAKE_VALGRIND_HAPPY(uv_default_loop());
+@@ -638,7 +638,7 @@ TEST_IMPL(poll_unidirectional) {
+ TEST_IMPL(poll_bad_fdtype) {
+ #if !defined(__sun) && \
+     !defined(_AIX) && !defined(__MVS__) && \
+-    !defined(__CYGWIN__) && !defined(__MSYS__)
++    !defined(__CYGWIN__) && !defined(__MSYS__)&& !defined(__QNX__)
+   uv_poll_t poll_handle;
+   int fd[2];
+ 
+diff --git a/test/test-process-priority.c b/test/test-process-priority.c
+index 941e4b36..5e61ef4c 100644
+--- a/test/test-process-priority.c
++++ b/test/test-process-priority.c
+@@ -28,9 +28,9 @@ TEST_IMPL(process_priority) {
+   int r;
+   int i;
+ 
+-#if defined(__MVS__)
++#if defined(__MVS__) || defined(__QNX__)
+   if (uv_os_setpriority(0, 0) == UV_ENOSYS)
+-    RETURN_SKIP("functionality not supported on zOS");
++    RETURN_SKIP("functionality not supported on zOS and QNX");
+ #endif
+ 
+   /* Verify that passing a NULL pointer returns UV_EINVAL. */
+diff --git a/test/test-process-title-threadsafe.c b/test/test-process-title-threadsafe.c
+index 05baaf44..daa13b8c 100644
+--- a/test/test-process-title-threadsafe.c
++++ b/test/test-process-title-threadsafe.c
+@@ -85,7 +85,7 @@ TEST_IMPL(process_title_threadsafe) {
+   int i;
+ 
+ #if defined(__sun) || defined(__CYGWIN__) || defined(__MSYS__) || \
+-    defined(__MVS__) || defined(__PASE__)
++    defined(__MVS__) || defined(__PASE__) || defined(__QNX__)
+   RETURN_SKIP("uv_(get|set)_process_title is not implemented.");
+ #endif
+ 
+diff --git a/test/test-process-title.c b/test/test-process-title.c
+index 7178cf87..3478033a 100644
+--- a/test/test-process-title.c
++++ b/test/test-process-title.c
+@@ -61,7 +61,7 @@ static void uv_get_process_title_edge_cases(void) {
+ 
+ TEST_IMPL(process_title) {
+ #if defined(__sun) || defined(__CYGWIN__) || defined(__MSYS__) || \
+-    defined(__PASE__)
++    defined(__PASE__) || defined(__QNX__)
+   RETURN_SKIP("uv_(get|set)_process_title is not implemented.");
+ #endif
+ 
+diff --git a/test/test-udp-ipv6.c b/test/test-udp-ipv6.c
+index 8ad80b9b..e21ad0aa 100644
+--- a/test/test-udp-ipv6.c
++++ b/test/test-udp-ipv6.c
+@@ -26,7 +26,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
+-#if defined(__FreeBSD__) || defined(__NetBSD__)
++#if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__QNX__)
+ #include <sys/sysctl.h>
+ #endif
+ 
+@@ -49,7 +49,7 @@ static int recv_cb_called;
+ static int close_cb_called;
+ static uint16_t client_port;
+ 
+-#if defined(__FreeBSD__) || defined(__NetBSD__)
++#if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__QNX__)
+ static int can_ipv6_ipv4_dual(void) {
+   int v6only;
+   size_t size = sizeof(int);
+@@ -228,7 +228,7 @@ TEST_IMPL(udp_dual_stack) {
+   if (!can_ipv6())
+     RETURN_SKIP("IPv6 not supported");
+ 
+-#if defined(__FreeBSD__) || defined(__NetBSD__)
++#if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__QNX__)
+   if (!can_ipv6_ipv4_dual())
+     RETURN_SKIP("IPv6-IPv4 dual stack not supported");
+ #elif defined(__OpenBSD__)
+diff --git a/test/test-udp-multicast-join.c b/test/test-udp-multicast-join.c
+index 58b05556..75fa7a4a 100644
+--- a/test/test-udp-multicast-join.c
++++ b/test/test-udp-multicast-join.c
+@@ -144,8 +144,8 @@ static void cl_recv_cb(uv_udp_t* handle,
+ 
+ 
+ TEST_IMPL(udp_multicast_join) {
+-#if defined(__OpenBSD__)
+-  RETURN_SKIP("Test does not currently work in OpenBSD");
++#if defined(__OpenBSD__) || defined(QNX_IOPKT)
++  RETURN_SKIP("Test does not currently work in OpenBSD or QNX");
+ #endif
+   int r;
+   struct sockaddr_in addr;
+diff --git a/test/test-udp-multicast-join6.c b/test/test-udp-multicast-join6.c
+index 430e4e33..c7d62431 100644
+--- a/test/test-udp-multicast-join6.c
++++ b/test/test-udp-multicast-join6.c
+@@ -35,7 +35,8 @@
+     defined(__MVS__)            || \
+     defined(__FreeBSD__)        || \
+     defined(__NetBSD__)         || \
+-    defined(__OpenBSD__)
++    defined(__OpenBSD__)        || \
++    defined(__QNX__)
+   #define MULTICAST_ADDR "ff02::1%lo0"
+   #define INTERFACE_ADDR "::1%lo0"
+ #else
+@@ -167,6 +168,9 @@ static int can_ipv6_external(void) {
+ 
+ 
+ TEST_IMPL(udp_multicast_join6) {
++#if defined(QNX_IOPKT)
++  RETURN_SKIP("Test does not currently work in QNX");
++#endif
+   int r;
+   struct sockaddr_in6 addr;
+ 
