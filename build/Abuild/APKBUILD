@@ -4,7 +4,7 @@
 # Maintainer: Ethan Leir <eleir@qnx.com>
 pkgname=libuv
 pkgver=1.51.0
-pkgrel=${pkgrel:-0}
+pkgrel=0
 pkgdesc="Cross-platform asychronous I/O"
 url="https://libuv.org/"
 arch="all"
@@ -48,7 +48,6 @@ package() {
 }
 
 
-options="$options ${DISABLE_CHECK:+!check}"
 sha512sums="
 99e5c6529fb97019d20d5ce8638be504c35236e7102a7a6b7a2242205928d152d6b535bb6f45961a78506d408eebd0e3300b090969a64fa87dfdf6c8f4291a12  libuv-v1.51.0.tar.gz
 74e5ce357837540d109ac8415f6c7c9067c3b2ffd40aceadef9ae3f6b77a3489619579ce722e4850466ab1463d655a5e64ea54641b41276760121aa5f169824f  qnx-support.patch
